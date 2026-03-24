@@ -1,0 +1,43 @@
+FROM quay.io/ascend/cann:8.5.1-a3-ubuntu22.04-py3.11
+# 设置时区禁用交互式配置
+ENV DEBIAN_FRONTEND=noninteractive
+ENV GIT_SSL_NO_VERIFY=1
+ARG PIP_INDEX_URL="https://mirrors.aliyun.com/pypi/simple"
+
+RUN apt-get update && apt-get install -y curl wget git git-lfs ca-certificates libssl-dev zlib1g-dev unzip tar gcc make cmake libffi-dev g++ libprotobuf-dev pkg-config build-essential libbz2-dev libreadline-dev libsqlite3-dev llvm xz-utils liblzma-dev libopenblas-dev vim protobuf-compiler
+
+#RUN pip3 install grpcio-tools mypy-protobuf
+
+RUN groupadd HwHiAiUser && useradd -g HwHiAiUser -d /home/HwHiAiUser -m HwHiAiUser -s /bin/bash
+
+USER HwHiAiUser:HwHiAiUser
+#安装 TEI
+WORKDIR /home/HwHiAiUser
+#安装RUST
+RUN curl https://sh.rustup.rs -sSf | bash -s -- -y --no-update-default-toolchain
+
+RUN git clone https://github.com/Jeaniowang/text-embeddings-inference.git && cd text-embeddings-inference && git checkout add_npu_adapt
+
+RUN cd /home/HwHiAiUser/text-embeddings-inference && bash -c "source $HOME/.cargo/env && cargo install --path router -F python -F http --no-default-features"
+
+USER root
+RUN pip config set global.index-url ${PIP_INDEX_URL}
+RUN cd /home/HwHiAiUser/text-embeddings-inference/backends/python/server && make -j$(nproc) && make install
+
+#升级python依赖软件
+RUN pip3 install einops
+
+#拷贝执行脚本
+COPY --chown=HwHiAiUser:HwHiAiUser ./package/start.sh /home/HwHiAiUser
+
+RUN chmod 751 /home/HwHiAiUser/start.sh
+
+RUN rm -rf /tmp/* && rm -rf /home/HwHiAiUser/text-embeddings-inference/target
+
+# 设置容器默认启动用户为HwHiAiUser
+USER HwHiAiUser:HwHiAiUser
+WORKDIR /home/HwHiAiUser
+
+ENTRYPOINT ["bash", "/home/HwHiAiUser/start.sh"]
+
+CMD ["BAAI/bge-large-zh-v1.5", "127.0.0.1", "8080"]

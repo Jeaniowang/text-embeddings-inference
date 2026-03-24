@@ -1,4 +1,5 @@
 import os
+from typing import Optional
 
 import torch
 import torch_npu
@@ -115,21 +116,23 @@ def npu_attn(
     max_seqlen_k,
     softmax_scale,
     is_causal=False,
+    num_key_value_heads: Optional[int] = None,
     ):
     if is_causal:
         attn_mask_npu = get_npu_attn_mask(q.device)
-        out_ = torch_npu.npu_fusion_attention(
-                query=q,
-                key=k,
-                value=v,
-                head_num=num_heads,
-                input_layout="TND",
-                scale=softmax_scale,
-                actual_seq_qlen=seqlen_q[1:].tolist(),
-                actual_seq_kvlen=seqlen_k[1:].tolist(),
-                sparse_mode=3,
-                atten_mask=attn_mask_npu
-            )[0]
+        out_ = torch_npu.npu_fused_infer_attention_score(
+            query=q,
+            key=k,
+            value=v,
+            num_heads=num_heads,
+            num_key_value_heads=num_key_value_heads,
+            input_layout="TND",
+            scale=softmax_scale,
+            actual_seq_lengths=seqlen_q[1:].tolist(),
+            actual_seq_lengths_kv=seqlen_k[1:].tolist(),
+            sparse_mode=3,
+            atten_mask=attn_mask_npu,
+        )[0]    
     else:
         out_ = torch_npu.npu_fusion_attention(
                     query=q,
@@ -145,7 +148,7 @@ def npu_attn(
 
 
 def attention(
-    q, k, v, num_heads, out, cu_seqlens, max_s, softmax_scale, is_causal=False, attn_mask=None
+    q, k, v, num_heads, out, cu_seqlens, max_s, softmax_scale, is_causal=False, attn_mask=None, num_key_value_heads: Optional[int] = None,
 ):
     if HAS_FLASH_ATTN_V2:
         if use_ipex:
@@ -219,6 +222,7 @@ def attention(
                 max_s,
                 softmax_scale,
                 is_causal,
+                num_key_value_heads,
                 )
             
         else:   

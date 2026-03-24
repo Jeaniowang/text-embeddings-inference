@@ -244,20 +244,16 @@ class Qwen3Attention:
         input_shape = hidden_states.shape[:-1]
 
         q = self.q_norm.forward(
-            F.linear(hidden_states, self.q_proj_weight).view(*input_shape, self.num_heads, self.head_dim)
+            torch_npu.npu_linear(hidden_states, self.q_proj_weight).view(*input_shape, self.num_heads, self.head_dim)
         )
         k = self.k_norm.forward(
-            F.linear(hidden_states, self.k_proj_weight).view(*input_shape, self.num_key_value_heads, self.head_dim)
+            torch_npu.npu_linear(hidden_states, self.k_proj_weight).view(*input_shape, self.num_key_value_heads, self.head_dim)
         )
-        v = F.linear(hidden_states, self.v_proj_weight).view(*input_shape, self.num_key_value_heads, self.head_dim)
+        v = torch_npu.npu_linear(hidden_states, self.v_proj_weight).view(*input_shape, self.num_key_value_heads, self.head_dim)
         
         cos, sin = position_embeddings
         q, k = apply_rotary_pos_emb_npu(q, k, cos, sin, unsqueeze_dim=1)
 
-        if self.num_key_value_groups > 1:
-        # 先扩展一个维度，然后 reshape 实现元素级重复
-            k = k.unsqueeze(2).expand(-1, -1, self.num_key_value_groups, -1).reshape(k.shape[0], -1, k.shape[2])
-            v = v.unsqueeze(2).expand(-1, -1, self.num_key_value_groups, -1).reshape(v.shape[0], -1, v.shape[2])
         attn_output = attention(
             q,
             k,
@@ -269,9 +265,10 @@ class Qwen3Attention:
             self.softmax_scale,
             is_causal=True,
             attn_mask=attn_mask,
+            num_key_value_heads=self.num_key_value_heads,
         )
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
-        attn_output = F.linear(attn_output, self.o_proj_weight, bias=None)
+        attn_output = torch_npu.npu_linear(attn_output, self.o_proj_weight)
 
         return attn_output
 
@@ -315,9 +312,9 @@ class Qwen3MLP:
 
 
     def forward(self, hidden_state):
-        gated_hidden_states = F.linear(hidden_state, self.gate_proj_weight)
-        uped_hidden_states = F.linear(hidden_state, self.up_proj_weight)
-        return F.linear(
+        gated_hidden_states = torch_npu.npu_linear(hidden_state, self.gate_proj_weight)
+        uped_hidden_states = torch_npu.npu_linear(hidden_state, self.up_proj_weight)
+        return torch_npu.npu_linear(
             self.act_fn(gated_hidden_states) * uped_hidden_states,
             self.down_proj_weight,
         )
@@ -542,7 +539,7 @@ class ForSequenceClassification(nn.Module):
         last_token_indices = cu_seqlens_list_new_tensor[1:] - 1
         hidden_states = output.last_hidden_state
         
-        logits = F.linear(hidden_states[last_token_indices], self.word_embeddings_weight).cpu() 
+        logits = torch_npu.npu_linear(hidden_states[last_token_indices], self.word_embeddings_weight).cpu() 
         true_logits = logits[:, self.token_true_id]
         false_logits = logits[:, self.token_false_id]
         logit_diff = true_logits - false_logits
