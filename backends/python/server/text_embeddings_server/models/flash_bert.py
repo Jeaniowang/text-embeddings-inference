@@ -11,7 +11,7 @@ from transformers.activations import ACT2FN
 from transformers.models.bert import BertConfig
 from opentelemetry import trace
 from text_embeddings_server.models import Model
-from text_embeddings_server.models.types import FlashBatch, PaddedBatch, Embedding, Score
+from text_embeddings_server.models.types import FlashBatch, PaddedBatch, Embedding, Score, TokenEmbedding
 from text_embeddings_server.utils.flash_attn import attention
 from text_embeddings_server.utils.device import use_ipex
 
@@ -253,6 +253,7 @@ class BertLayer:
         self.layer_norm = FastLayerNorm(
             f"{prefix}.output.LayerNorm", handle, device, dtype, config
         )
+          
     def forward(self, hidden_states, cu_seqlens, max_s, attn_mask=None):
         hidden_states = self.attention.forward(
             hidden_states, cu_seqlens, max_s, attn_mask
@@ -299,8 +300,8 @@ class FlashBertModel:
         encoder_outputs = self.encoder.forward(embeddings, cu_seqlens, max_s, attn_mask)
         if mask is not None:
             outputs = encoder_outputs[mask]
-            return outputs[cu_seqlens[:-1]]
-        return encoder_outputs[cu_seqlens[:-1]]
+            return outputs
+        return encoder_outputs
 
   
 class BertClassificationHead(nn.Module):
@@ -351,7 +352,8 @@ class BertForSequenceClassification(nn.Module):
             max_s,
             mask=None,
             attn_mask=None)
-        logits =  self.classifier(sequence_output)
+        embedding = sequence_output[cu_seqlens[:-1]]
+        logits =  self.classifier(embedding)
         return logits
     
 
@@ -400,30 +402,15 @@ class FlashBert(Model):
 
     @tracer.start_as_current_span("embed")
     def embed(self, batch: Union[FlashBatch, PaddedBatch]) -> List[Embedding]:
-        if isinstance(batch, PaddedBatch):
-            input_lens = batch.attention_mask.cumsum(-1)[:, -1].to(torch.int32)
-            max_input_lens = 0  # This value will not be used
-            cu_seqlens = torch.cat(
-                (input_lens.new_tensor([0]), input_lens.cumsum(-1).int())
-            )
-            mask = batch.attention_mask.bool()
-            bsz, tgt_len = mask.size()
-            min_val = torch.finfo(self.dtype).min
-            attn_mask = torch.full(
-                [bsz, 1, tgt_len, tgt_len],
-                fill_value=min_val,
-                device=self.device,
-                dtype=self.dtype,
-            )
-            expanded_mask = mask[:, None, None, :].expand(bsz, 1, tgt_len, tgt_len)
-            attn_mask = attn_mask.masked_fill(expanded_mask, 0.0)
-        elif isinstance(batch, FlashBatch):
-            cu_seqlens = batch.cu_seqlens
-            mask = None
-            attn_mask = None
-            max_input_lens = batch.max_s
+        if not isinstance(batch, FlashBatch):
+            raise ValueError("only FlashBatch is supported")
 
-        embedding = self.model.forward(
+        cu_seqlens = batch.cu_seqlens
+        mask = None
+        attn_mask = None
+        max_input_lens = batch.max_s
+
+        all_embedding = self.model.forward(
             input_ids=batch.input_ids,
             token_type_ids=batch.token_type_ids,
             position_ids=batch.position_ids,
@@ -432,6 +419,7 @@ class FlashBert(Model):
             mask=mask,
             attn_mask=attn_mask,
         )
+        embedding = all_embedding[cu_seqlens[:-1]]
         cpu_results = embedding.view(-1).tolist()
 
         return [
@@ -441,30 +429,49 @@ class FlashBert(Model):
             for i in range(len(batch))
         ]
         
+    @tracer.start_as_current_span("embed_all")
+    def embed_all(self, batch: Union[FlashBatch, PaddedBatch]):
+        if not isinstance(batch, FlashBatch):
+            raise ValueError("only FlashBatch is supported")
+
+        cu_seqlens = batch.cu_seqlens
+        mask = None
+        attn_mask = None
+        max_input_lens = batch.max_s
+        batch_size = batch.size
+        
+        all_embedding = self.model.forward(
+            input_ids=batch.input_ids,
+            token_type_ids=batch.token_type_ids,
+            position_ids=batch.position_ids,
+            cu_seqlens=cu_seqlens,
+            max_s=max_input_lens,
+            mask=mask,
+            attn_mask=attn_mask,
+        )
+        
+        seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
+        cpu_results = all_embedding.tolist()
+        embedding_result=[]
+        for i in range(batch_size):
+            embedding_tmp=[
+                Embedding(values=cpu_results[j])
+                for j in range(seqlens.tolist()[i])
+            ]
+            token_embeddings=TokenEmbedding(embeddings=embedding_tmp)
+            embedding_result.append(token_embeddings)
+
+        return embedding_result
+        
     @tracer.start_as_current_span("predict")
     def predict(self, batch: Union[FlashBatch, PaddedBatch]) -> List[Score]:
-        if isinstance(batch, PaddedBatch):
-            input_lens = batch.attention_mask.cumsum(-1)[:, -1].to(torch.int32)
-            max_input_lens = 0  # This value will not be used
-            cu_seqlens = torch.cat(
-                (input_lens.new_tensor([0]), input_lens.cumsum(-1).int())
-            )
-            mask = batch.attention_mask.bool()
-            bsz, tgt_len = mask.size()
-            min_val = torch.finfo(self.dtype).min
-            attn_mask = torch.full(
-                [bsz, 1, tgt_len, tgt_len],
-                fill_value=min_val,
-                device=self.device,
-                dtype=self.dtype,
-            )
-            expanded_mask = mask[:, None, None, :].expand(bsz, 1, tgt_len, tgt_len)
-            attn_mask = attn_mask.masked_fill(expanded_mask, 0.0)
-        elif isinstance(batch, FlashBatch):
-            cu_seqlens = batch.cu_seqlens
-            mask = None
-            attn_mask = None
-            max_input_lens = batch.max_s
+        if not isinstance(batch, FlashBatch):
+            raise ValueError("only FlashBatch is supported")
+
+        cu_seqlens = batch.cu_seqlens
+        mask = None
+        attn_mask = None
+        max_input_lens = batch.max_s
 
         logits = self.model.forward(
             input_ids=batch.input_ids,

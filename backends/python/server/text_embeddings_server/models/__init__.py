@@ -115,7 +115,7 @@ def get_model(model_path: Path, dtype: Optional[str], pool: str):
         else:
             return create_model(DefaultModel, model_path, device, datatype, pool)
 
-    if config.model_type == "roberta" or config.model_type == "xlm-roberta":
+    if (config.model_type == "roberta" or config.model_type == "xlm-roberta") and pool != "splade":
         if str(model_path).endswith("unixcoder-base"):
             return create_model(UniXcoderModel, model_path, device, datatype)
         
