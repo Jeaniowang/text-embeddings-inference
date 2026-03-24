@@ -179,7 +179,7 @@ class BertAttention:
 
     def forward(self, hidden_states, cu_seqlens, max_s, attn_mask=None):
         residual = hidden_states
-        qkv = F.linear(hidden_states, self.qkv_weight.T, self.qkv_bias)
+        qkv = torch_npu.npu_linear(hidden_states, self.qkv_weight.T, self.qkv_bias)
         bs = 1
         hidden_dim = hidden_states.size(-1)
         is_flat = True
@@ -259,11 +259,11 @@ class BertLayer:
             hidden_states, cu_seqlens, max_s, attn_mask
         )
         residual = hidden_states
-        hidden_states = F.linear(
+        hidden_states = torch_npu.npu_linear(
             hidden_states, self.intermediate_weight, self.intermediate_bias
         )
         hidden_states = self.intermediate_act_fn(hidden_states)
-        hidden_states = F.linear(hidden_states, self.output_weight.T, self.output_bias)
+        hidden_states = torch_npu.npu_linear(hidden_states, self.output_weight.T, self.output_bias)
         hidden_states, _ = self.layer_norm.forward(hidden_states, residual)
         return hidden_states
 
@@ -319,7 +319,7 @@ class BertClassificationHead(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # CLSPool has already been applied in `pooling`
-        x = F.linear(
+        x = torch_npu.npu_linear(
             x, self.classifier_dense_weight, self.classifier_dense_bias
         )
         return x
