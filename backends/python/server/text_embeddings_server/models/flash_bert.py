@@ -1,14 +1,17 @@
 import torch
 from pathlib import Path
 from torch import nn
+import torch_npu
 import torch.nn.functional as F
+from loguru import logger
 from typing import Type, List, Union
 from safetensors import safe_open
+from safetensors.torch import save_file
 from transformers.activations import ACT2FN
 from transformers.models.bert import BertConfig
 from opentelemetry import trace
 from text_embeddings_server.models import Model
-from text_embeddings_server.models.types import FlashBatch, Embedding, PaddedBatch
+from text_embeddings_server.models.types import FlashBatch, PaddedBatch, Embedding, Score
 from text_embeddings_server.utils.flash_attn import attention
 from text_embeddings_server.utils.device import use_ipex
 
@@ -89,6 +92,14 @@ class FastLayerNorm:
                 self.variance_epsilon,
                 residual is not None,
             )
+            res = residual if residual is not None else hidden_states
+        elif self.device.type == "npu":
+            normed_hidden_states = torch_npu.npu_add_layer_norm(hidden_states, 
+                                                                residual, 
+                                                                self.weight,
+                                                                self.bias, 
+                                                                self.variance_epsilon,
+                                                                )[0]
             res = residual if residual is not None else hidden_states
         return normed_hidden_states, res
 
@@ -182,12 +193,12 @@ class BertAttention:
             q, k, v = qkv.view(-1, self.num_heads * 3, self.head_size).split(
                 self.num_heads, dim=1
             )
-        attn_output = torch.empty_like(q)
-        attention(
+        attn_output = attention(
             q,
             k,
             v,
-            attn_output,
+            self.num_heads,
+            None,
             cu_seqlens,
             max_s,
             self.softmax_scale,
@@ -214,7 +225,7 @@ class BertLayer:
 
         self.intermediate_weight = (
             handle.get_tensor(f"{prefix}.intermediate.dense.weight")
-            .T.to(dtype)
+            .to(dtype)
             .to(device)
         )
         self.intermediate_bias = (
@@ -242,14 +253,13 @@ class BertLayer:
         self.layer_norm = FastLayerNorm(
             f"{prefix}.output.LayerNorm", handle, device, dtype, config
         )
-
     def forward(self, hidden_states, cu_seqlens, max_s, attn_mask=None):
         hidden_states = self.attention.forward(
             hidden_states, cu_seqlens, max_s, attn_mask
         )
         residual = hidden_states
         hidden_states = F.linear(
-            hidden_states, self.intermediate_weight.T, self.intermediate_bias
+            hidden_states, self.intermediate_weight, self.intermediate_bias
         )
         hidden_states = self.intermediate_act_fn(hidden_states)
         hidden_states = F.linear(hidden_states, self.output_weight.T, self.output_bias)
@@ -292,6 +302,58 @@ class FlashBertModel:
             return outputs[cu_seqlens[:-1]]
         return encoder_outputs[cu_seqlens[:-1]]
 
+  
+class BertClassificationHead(nn.Module):
+    """Head for sentence-level classification tasks."""
+
+    def __init__(self, handle, device, dtype, config):
+        super().__init__()
+        self.num_labels = config.num_labels
+        self.classifier_dense_weight = (
+            handle.get_tensor(f"bert.pooler.dense.weight").to(dtype).to(device)
+        )
+        self.classifier_dense_bias = (
+            handle.get_tensor(f"bert.pooler.dense.bias").to(dtype).to(device)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # CLSPool has already been applied in `pooling`
+        x = F.linear(
+            x, self.classifier_dense_weight, self.classifier_dense_bias
+        )
+        return x
+       
+
+class BertForSequenceClassification(nn.Module):
+    def __init__(self, handle, device, dtype, config: BertConfig):
+        super().__init__()
+        self.config = config
+        self.num_labels = config.num_labels
+        
+        self.bert = FlashBertModel(handle, device, dtype, config)
+        self.classifier = BertClassificationHead(handle, device, dtype, config)
+    
+    def forward(
+            self,
+            input_ids,
+            token_type_ids,
+            position_ids,
+            cu_seqlens,
+            max_s,
+            mask=None,
+            attn_mask=None,
+            ):
+
+        sequence_output = self.bert(input_ids,
+            token_type_ids,
+            position_ids,
+            cu_seqlens,
+            max_s,
+            mask=None,
+            attn_mask=None)
+        logits =  self.classifier(sequence_output)
+        return logits
+    
 
 class FlashBert(Model):
     def __init__(
@@ -309,8 +371,22 @@ class FlashBert(Model):
         else:
             self.max_input_length = config.max_position_embeddings
 
+        safe_weight_path = model_path / "model.safetensors"
+        bin_weight_path = model_path / "pytorch_model.bin"
+        if not safe_weight_path.exists() and not bin_weight_path.exists():
+            logger.error(f"pytorch_model.bin and model.safetensors do not exist")
+            raise FileNotFoundError(f"pytorch_model.bin and model.safetensors do not exist")
+        if not safe_weight_path.exists():
+            logger.info(f"model.safetensors does not exist, translate pytorch_model.bin to model.safetensors")
+            stat_dict = torch.load(bin_weight_path.as_posix(), map_location=torch.device('cpu'))
+            save_file(stat_dict, safe_weight_path.as_posix())
+
         with safe_open(model_path / "model.safetensors", framework="pt") as f:
-            model = FlashBertModel(f, device, dtype, config)
+            if config.architectures[0].endswith("Classification"):
+                model = BertForSequenceClassification(f, device, dtype, config)
+            else:
+                model = FlashBertModel(f, device, dtype, config)
+                
         self.device = device
         self.dtype = dtype
         self.hidden_size = config.hidden_size
@@ -364,3 +440,41 @@ class FlashBert(Model):
             )
             for i in range(len(batch))
         ]
+        
+    @tracer.start_as_current_span("predict")
+    def predict(self, batch: Union[FlashBatch, PaddedBatch]) -> List[Score]:
+        if isinstance(batch, PaddedBatch):
+            input_lens = batch.attention_mask.cumsum(-1)[:, -1].to(torch.int32)
+            max_input_lens = 0  # This value will not be used
+            cu_seqlens = torch.cat(
+                (input_lens.new_tensor([0]), input_lens.cumsum(-1).int())
+            )
+            mask = batch.attention_mask.bool()
+            bsz, tgt_len = mask.size()
+            min_val = torch.finfo(self.dtype).min
+            attn_mask = torch.full(
+                [bsz, 1, tgt_len, tgt_len],
+                fill_value=min_val,
+                device=self.device,
+                dtype=self.dtype,
+            )
+            expanded_mask = mask[:, None, None, :].expand(bsz, 1, tgt_len, tgt_len)
+            attn_mask = attn_mask.masked_fill(expanded_mask, 0.0)
+        elif isinstance(batch, FlashBatch):
+            cu_seqlens = batch.cu_seqlens
+            mask = None
+            attn_mask = None
+            max_input_lens = batch.max_s
+
+        logits = self.model.forward(
+            input_ids=batch.input_ids,
+            token_type_ids=batch.token_type_ids,
+            position_ids=batch.position_ids,
+            cu_seqlens=cu_seqlens,
+            max_s=max_input_lens,
+            mask=mask,
+            attn_mask=attn_mask,
+        )
+    
+        all_scores = logits.tolist()
+        return [Score(values=scores) for scores in all_scores]

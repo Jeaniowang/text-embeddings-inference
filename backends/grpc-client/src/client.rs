@@ -18,7 +18,7 @@ impl Client {
         let channel = Channel::builder(uri).connect().await?;
 
         Ok(Self {
-            stub: EmbeddingServiceClient::new(channel),
+            stub: EmbeddingServiceClient::new(channel).max_decoding_message_size(100*1024*1024).max_encoding_message_size(100*1024*1024),
         })
     }
 
@@ -32,7 +32,7 @@ impl Client {
             .await?;
 
         Ok(Self {
-            stub: EmbeddingServiceClient::new(channel),
+            stub: EmbeddingServiceClient::new(channel).max_decoding_message_size(100*1024*1024).max_encoding_message_size(100*1024*1024),
         })
     }
 
@@ -63,6 +63,27 @@ impl Client {
         .inject_context();
         let response = self.stub.embed(request).await?.into_inner();
         Ok(response.embeddings)
+    }
+
+    #[instrument(skip_all)]
+    pub async fn embed_all(
+        &mut self,
+        input_ids: Vec<u32>,
+        token_type_ids: Vec<u32>,
+        position_ids: Vec<u32>,
+        cu_seq_lengths: Vec<u32>,
+        max_length: u32,
+    ) -> Result<Vec<TokenEmbedding>> {
+        let request = tonic::Request::new(EmbedRequest {
+            input_ids,
+            token_type_ids,
+            position_ids,
+            max_length,
+            cu_seq_lengths,
+        })
+        .inject_context();
+        let response = self.stub.embed_all(request).await?.into_inner();
+        Ok(response.allembeddings)
     }
 
     #[instrument(skip_all)]

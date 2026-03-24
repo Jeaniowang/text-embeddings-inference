@@ -5,6 +5,7 @@ package embedding.v1;
 service EmbeddingService {
     /// Decode token for a list of prefilled batches
     rpc Embed (EmbedRequest) returns (EmbedResponse);
+    rpc Embed_all (EmbedRequest) returns (RawEmbedResponse);
     /// Health check
     rpc Health (HealthRequest) returns (HealthResponse);
     /// Predict
@@ -37,4 +38,12 @@ message Score {
 
 message PredictResponse {
     repeated Score scores = 1;
+}
+
+message TokenEmbedding {
+    repeated Embedding embeddings = 1;
+}
+
+message RawEmbedResponse {
+    repeated TokenEmbedding allembeddings = 1;
 }

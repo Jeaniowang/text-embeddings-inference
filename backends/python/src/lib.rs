@@ -73,31 +73,53 @@ impl Backend for PythonBackend {
     }
 
     fn embed(&self, batch: Batch) -> Result<Embeddings, BackendError> {
-        if !batch.raw_indices.is_empty() {
-            return Err(BackendError::Inference(
-                "raw embeddings are not supported for the Python backend.".to_string(),
-            ));
-        }
         let batch_size = batch.len();
-
-        let results = self
-            .tokio_runtime
-            .block_on(self.backend_client.clone().embed(
-                batch.input_ids,
-                batch.token_type_ids,
-                batch.position_ids,
-                batch.cumulative_seq_lengths,
-                batch.max_length,
-            ))
-            .map_err(|err| BackendError::Inference(err.to_string()))?;
-        let pooled_embeddings: Vec<Vec<f32>> = results.into_iter().map(|r| r.values).collect();
 
         let mut embeddings =
             HashMap::with_capacity_and_hasher(batch_size, BuildNoHashHasher::default());
-        for (i, e) in pooled_embeddings.into_iter().enumerate() {
-            embeddings.insert(i, Embedding::Pooled(e));
-        }
 
+        if !batch.pooled_indices.is_empty() {
+            let results = self
+                .tokio_runtime
+                .block_on(self.backend_client.clone().embed(
+                    batch.input_ids,
+                    batch.token_type_ids,
+                    batch.position_ids,
+                    batch.cumulative_seq_lengths,
+                    batch.max_length,
+                ))
+                .map_err(|err| BackendError::Inference(err.to_string()))?;
+
+            let pooled_embeddings: Vec<Vec<f32>> = results.into_iter().map(|r| r.values).collect();
+            for (i, e) in pooled_embeddings.into_iter().enumerate() {
+                embeddings.insert(i, Embedding::Pooled(e));
+            }
+        }
+        else if !batch.raw_indices.is_empty() {
+            let results = self
+                .tokio_runtime
+                .block_on(self.backend_client.clone().embed_all(
+                    batch.input_ids,
+                    batch.token_type_ids,
+                    batch.position_ids,
+                    batch.cumulative_seq_lengths,
+                    batch.max_length,
+                ))
+                .map_err(|err| BackendError::Inference(err.to_string()))?;
+            
+            let mut raw_embeddings = Vec::new();
+            for token_embedding in results {
+                let mut two_dim_list = Vec::new();
+                for embeddings in token_embedding.embeddings {
+                    let values = embeddings.values.clone();
+                    two_dim_list.push(values);
+                }
+                raw_embeddings.push(two_dim_list);
+            }
+            for (i, e) in raw_embeddings.into_iter().enumerate() {
+                embeddings.insert(i, Embedding::All(e));
+            }
+        }
         Ok(embeddings)
     }
 

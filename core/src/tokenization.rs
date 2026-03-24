@@ -295,7 +295,7 @@ fn tokenize_input(
     prompts: Option<&HashMap<String, String>>,
     tokenizer: &mut Tokenizer,
 ) -> Result<(Option<String>, RawEncoding), TextEmbeddingsError> {
-    let pre_prompt = prepare_pre_prompt(default_prompt, prompt_name, prompts)?;
+    let pre_prompt = prepare_pre_prompt(default_prompt.clone(), prompt_name, prompts)?;
 
     let input_chars = inputs.count_chars();
     let limit = max_input_length * MAX_CHAR_MULTIPLIER;
@@ -325,18 +325,37 @@ fn tokenize_input(
             (Some(s), encoding)
         }
         EncodingInput::Dual(s1, s2) => {
-            if pre_prompt.is_some() {
+            let is_rerank = std::env::var("IS_RERANK").ok().as_deref() == Some("1");
+        
+            if is_rerank {
+                let default_prompt = default_prompt.ok_or_else(|| {
+                    TextEmbeddingsError::Validation(
+                        "In rerank mode, `--default-prompt` must be set.".to_string(),
+                    )
+                })?;
+        
+                let prompt = default_prompt
+                    .replace("\\n", "\n")
+                    .replace("<s1>", &s1)
+                    .replace("<s2>", &s2);
+        
+                let encoding = tokenizer
+                    .with_truncation(truncate_params)?
+                    .encode::<&str>(&prompt, add_special_tokens)?;
+        
+                (Some(prompt), encoding)
+            } else if pre_prompt.is_some() {
                 return Err(TextEmbeddingsError::Validation(
                     "`prompt_name` cannot be set with dual inputs".to_string(),
                 ));
+            } else {
+                (
+                    None,
+                    tokenizer
+                        .with_truncation(truncate_params)?
+                        .encode::<(String, String)>((s1, s2), add_special_tokens)?,
+                )
             }
-
-            (
-                None,
-                tokenizer
-                    .with_truncation(truncate_params)?
-                    .encode::<(String, String)>((s1, s2), add_special_tokens)?,
-            )
         }
         // input is encoded -> convert to tokenizers Encoding
         EncodingInput::Ids(ids) => {

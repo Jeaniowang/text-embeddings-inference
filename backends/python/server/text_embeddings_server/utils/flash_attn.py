@@ -1,9 +1,10 @@
 import os
 
 import torch
+import torch_npu
 from loguru import logger
 
-from text_embeddings_server.utils.device import is_hpu, use_ipex
+from text_embeddings_server.utils.device import is_hpu, use_ipex, is_npu
 
 if os.getenv("USE_FLASH_ATTENTION", "").lower() == "false":
     raise ImportError("`USE_FLASH_ATTENTION` is false.")
@@ -13,8 +14,23 @@ HAS_FLASH_ATTN_V2 = False
 
 is_hpu = is_hpu()
 use_ipex = use_ipex()
+is_npu = is_npu()
 
-if use_ipex or is_hpu:
+attn_mask_npu_cache = None
+
+def get_npu_attn_mask(device):
+    global attn_mask_npu_cache
+    if attn_mask_npu_cache is not None:
+        return attn_mask_npu_cache
+    
+    attn_mask_npu_cache = torch.triu(torch.ones((2048, 2048), dtype=torch.bool, device=device), diagonal=1)
+    
+    return attn_mask_npu_cache
+    
+
+if is_npu:
+    HAS_FLASH_ATTN = True
+elif use_ipex or is_hpu:
     HAS_FLASH_ATTN_V2 = True
 else:
     if not torch.cuda.is_available():
@@ -86,9 +102,50 @@ def hpu_attn(
     out.copy_(out_)
     return out
 
+def npu_attn(
+    q,
+    k,
+    v,
+    num_heads,
+    out,
+    attn_mask,
+    seqlen_q,
+    seqlen_k,
+    max_seqlen_q,
+    max_seqlen_k,
+    softmax_scale,
+    is_causal=False,
+    ):
+    if is_causal:
+        attn_mask_npu = get_npu_attn_mask(q.device)
+        out_ = torch_npu.npu_fusion_attention(
+                query=q,
+                key=k,
+                value=v,
+                head_num=num_heads,
+                input_layout="TND",
+                scale=softmax_scale,
+                actual_seq_qlen=seqlen_q[1:].tolist(),
+                actual_seq_kvlen=seqlen_k[1:].tolist(),
+                sparse_mode=3,
+                atten_mask=attn_mask_npu
+            )[0]
+    else:
+        out_ = torch_npu.npu_fusion_attention(
+                    query=q,
+                    key=k,
+                    value=v,
+                    head_num=num_heads,
+                    input_layout="TND",
+                    scale=softmax_scale,
+                    actual_seq_qlen=seqlen_q[1:].tolist(),
+                    actual_seq_kvlen=seqlen_k[1:].tolist(),
+                )[0]
+    return out_
+
 
 def attention(
-    q, k, v, out, cu_seqlens, max_s, softmax_scale, is_causal=False, attn_mask=None
+    q, k, v, num_heads, out, cu_seqlens, max_s, softmax_scale, is_causal=False, attn_mask=None
 ):
     if HAS_FLASH_ATTN_V2:
         if use_ipex:
@@ -148,22 +205,39 @@ def attention(
             )
 
     if HAS_FLASH_ATTN:
-        return flash_attn_cuda.fwd(
-            q,
-            k,
-            v,
-            out,
-            cu_seqlens,
-            cu_seqlens,
-            max_s,
-            max_s,
-            0.0,
-            softmax_scale,
-            False,
-            is_causal,
-            False,
-            0,
-            None,
-        )
+        if is_npu:
+            return npu_attn(
+                q,
+                k,
+                v,
+                num_heads,
+                out,
+                attn_mask,
+                cu_seqlens,
+                cu_seqlens,
+                max_s,
+                max_s,
+                softmax_scale,
+                is_causal,
+                )
+            
+        else:   
+            return flash_attn_cuda.fwd(
+                q,
+                k,
+                v,
+                out,
+                cu_seqlens,
+                cu_seqlens,
+                max_s,
+                max_s,
+                0.0,
+                softmax_scale,
+                False,
+                is_causal,
+                False,
+                0,
+                None,
+            )
 
     raise NotImplementedError("flash attention is not installed")

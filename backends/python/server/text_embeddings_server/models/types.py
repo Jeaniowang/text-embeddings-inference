@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from opentelemetry import trace
 
 from text_embeddings_server.pb import embed_pb2
-from text_embeddings_server.pb.embed_pb2 import Embedding, Score
+from text_embeddings_server.pb.embed_pb2 import Embedding, Score, TokenEmbedding
 
 tracer = trace.get_tracer(__name__)
 PAD_SEQUENCE_TO_MULTIPLE_OF = int(os.environ.get("PAD_SEQUENCE_TO_MULTIPLE_OF", 128))
@@ -36,6 +36,7 @@ class PaddedBatch(Batch):
     token_type_ids: torch.Tensor
     position_ids: torch.Tensor
     attention_mask: torch.Tensor
+    max_length: int
 
     @classmethod
     @tracer.start_as_current_span("from_pb")
@@ -82,6 +83,7 @@ class PaddedBatch(Batch):
             token_type_ids=all_tensors[1],
             position_ids=all_tensors[2],
             attention_mask=all_tensors[3],
+            max_length=max_length,
         )
 
     def __len__(self):
@@ -111,7 +113,7 @@ class FlashBatch(Batch):
             pb.position_ids, dtype=torch.int32, device=device
         )
 
-        cu_seqlens = torch.tensor(pb.cu_seq_lengths, dtype=torch.int32, device=device)
+        cu_seqlens = torch.tensor(pb.cu_seq_lengths, dtype=torch.int32, device="cpu")
 
         return FlashBatch(
             input_ids=batch_input_ids,

@@ -53,7 +53,7 @@ impl Default for DType {
         }
         #[cfg(feature = "python")]
         {
-            DType::Bfloat16
+            DType::Float16
         }
     }
 }

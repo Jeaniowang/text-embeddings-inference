@@ -50,6 +50,14 @@ def is_hpu() -> bool:
     return is_hpu_available
 
 
+def is_npu() -> bool:
+    is_npu_available = False
+    if torch.npu.is_available():
+        is_npu_available = True
+
+    return is_npu_available
+
+
 def use_ipex() -> bool:
     value = os.environ.get("USE_IPEX", "True").lower()
     return value in ["true", "1"] and _is_ipex_available()
@@ -59,6 +67,15 @@ def get_device():
     device = torch.device("cpu")
     if torch.cuda.is_available():
         device = torch.device("cuda")
+        
+    elif is_npu():
+        device = torch.device("npu")
+        torch.npu.set_compile_mode(jit_compile=False)
+        option = {"NPU_FUZZY_COMPILE_BLACKLIST": "ReduceProd"}
+        torch.npu.set_option(option)
+        deviceIdx = os.environ.get('TEI_NPU_DEVICE')
+        if deviceIdx != None and deviceIdx.isdigit() and int(deviceIdx) >= 0 and int(deviceIdx) <= 7:
+            torch.npu.set_device(torch.device(f"npu:{deviceIdx}"))
     elif is_hpu():
         import habana_frameworks.torch.core as htcore
 

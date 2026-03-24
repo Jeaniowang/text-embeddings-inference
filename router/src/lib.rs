@@ -36,6 +36,7 @@ use tokenizers::processors::sequence::Sequence;
 use tokenizers::processors::template::TemplateProcessing;
 use tokenizers::{PostProcessorWrapper, Tokenizer};
 use tracing::Span;
+use std::env;
 
 pub use logging::init_logging;
 
@@ -114,8 +115,21 @@ pub async fn run(
     // Set model type from config
     let backend_model_type = get_backend_model_type(&config, &model_root, pooling)?;
 
+    let is_rerank = std::env::var("IS_RERANK").unwrap_or_default() == "1";
     // Info model type
     let model_type = match &backend_model_type {
+        text_embeddings_backend::ModelType::Classifier if is_rerank => {
+            // if env RERANK is set to 1, we will always use reranker branch
+            let mut id2label = std::collections::HashMap::new();
+            id2label.insert("0".to_string(), "LABEL_0".to_string());
+
+            let mut label2id = std::collections::HashMap::new();
+            label2id.insert("LABEL_0".to_string(), 0);
+
+            let classifier_model = ClassifierModel { id2label, label2id };
+            ModelType::Reranker(classifier_model)
+        }
+
         text_embeddings_backend::ModelType::Classifier => {
             let id2label = config
                 .id2label
@@ -287,11 +301,12 @@ pub async fn run(
         .context("Model backend is not healthy")?;
 
     tracing::info!("Warming up model");
+    let _max_batch_requests = Some(3);
     backend
         .warmup(
-            max_input_length,
-            max_batch_tokens,
-            max_batch_requests,
+            4,
+            4,
+            _max_batch_requests,
             backend.padded_model,
         )
         .await
@@ -405,11 +420,11 @@ fn get_backend_model_type(
             continue;
         }
 
-        if Some(text_embeddings_backend::Pool::Splade) == pooling && arch.ends_with("MaskedLM") {
+        if Some(text_embeddings_backend::Pool::Splade) == pooling && (arch.ends_with("MaskedLM") || arch.ends_with("RobertaModel")) {
             return Ok(text_embeddings_backend::ModelType::Embedding(
                 text_embeddings_backend::Pool::Splade,
             ));
-        } else if arch.ends_with("Classification") {
+        } else if arch.ends_with("Classification") || env::var("IS_RERANK").is_ok() {
             if pooling.is_some() {
                 tracing::warn!(
                     "`--pooling` arg is set but model is a classifier. Ignoring `--pooling` arg."

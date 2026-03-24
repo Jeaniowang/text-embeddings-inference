@@ -56,7 +56,7 @@ struct Args {
     /// The maximum amount of concurrent requests for this particular deployment.
     /// Having a low limit will refuse clients requests instead of having them
     /// wait for too long and is usually good to handle backpressure correctly.
-    #[clap(default_value = "512", long, env)]
+    #[clap(default_value = "64", long, env)]
     max_concurrent_requests: usize,
 
     /// **IMPORTANT** This is one critical control to allow maximum usage

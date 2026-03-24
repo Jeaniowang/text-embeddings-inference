@@ -1,9 +1,3 @@
-include Makefile-flash-att
-include Makefile-flash-att-v2
-
-unit-tests:
-	pytest -s -vv -m "not private" tests
-
 gen-server:
 	# Compile protos
 	pip install grpcio-tools==1.62.2 mypy-protobuf==3.6.0 'types-protobuf' --no-cache-dir

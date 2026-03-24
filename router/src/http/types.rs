@@ -273,6 +273,26 @@ pub(crate) struct Rank {
 #[derive(Serialize, ToSchema)]
 pub(crate) struct RerankResponse(pub Vec<Rank>);
 
+#[derive(Serialize, ToSchema)]
+pub(crate) struct DocumentWrapper {
+    #[schema(example = "Deep Learning is ...")]
+    pub text: String,
+}
+
+#[derive(Serialize, ToSchema)]
+pub(crate) struct OpenAIRank {
+    #[schema(example = "0")]
+    pub index: usize,
+    #[schema(nullable = true, example = r#"{"text": "Deep Learning is ..."}"#, default = "null")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document: Option<DocumentWrapper>,
+    #[schema(example = "1.0")]
+    pub relevance_score: f32,
+}
+
+#[derive(Serialize, ToSchema)]
+pub(crate) struct OpenAICompatRerankResponse{pub results: Vec<OpenAIRank>}
+
 #[derive(Deserialize, ToSchema, Debug)]
 #[serde(untagged)]
 pub(crate) enum InputType {
@@ -329,6 +349,28 @@ pub(crate) struct OpenAICompatRequest {
     pub dimensions: Option<usize>,
 }
 
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct OpenAICompatRerankRequest {
+    #[schema(example = "What is Deep Learning?")]
+    pub query: String,
+    #[schema(example = json!(["Deep Learning is ..."]))]
+    pub documents: Vec<String>,
+    #[serde(default)]
+    #[schema(default = "false", example = "false", nullable = true)]
+    pub truncate: Option<bool>,
+    #[serde(default)]
+    #[schema(default = "right", example = "right")]
+    pub truncation_direction: TruncationDirection,
+    #[serde(default)]
+    #[schema(default = "false", example = "false")]
+    pub raw_scores: bool,
+    #[serde(default)]
+    #[schema(default = "false", example = "false")]
+    pub return_documents: bool,
+    #[serde(default)]
+    #[schema(example = 3, minimum = 1, nullable = true)]
+    pub top_n: Option<usize>,
+}
 #[derive(Serialize, ToSchema)]
 #[serde(untagged)]
 pub(crate) enum Embedding {

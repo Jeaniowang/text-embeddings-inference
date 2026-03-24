@@ -1,5 +1,8 @@
 import asyncio
 import torch
+import torch_npu
+import os
+
 from grpc import aio
 from loguru import logger
 
@@ -11,6 +14,9 @@ from text_embeddings_server.models import Model, get_model
 from text_embeddings_server.pb import embed_pb2_grpc, embed_pb2
 from text_embeddings_server.utils.tracing import UDSOpenTelemetryAioServerInterceptor
 from text_embeddings_server.utils.interceptor import ExceptionInterceptor
+
+
+clean_npu_cache = os.getenv("CLEAN_NPU_CACHE", "False")
 
 
 class EmbeddingService(embed_pb2_grpc.EmbeddingServiceServicer):
@@ -31,9 +37,22 @@ class EmbeddingService(embed_pb2_grpc.EmbeddingServiceServicer):
         )
 
         embeddings = self.model.embed(batch)
+        if clean_npu_cache == "True":
+            torch_npu.npu.empty_cache()
 
         return embed_pb2.EmbedResponse(embeddings=embeddings)
 
+    async def Embed_all(self, request, context):
+        max_input_length = self.model.max_input_length
+        batch = self.model.batch_type.from_pb(request, self.model.device, max_input_length)
+
+        embeddings = self.model.embed_all(batch)
+        
+        if clean_npu_cache == "True":
+            torch_npu.npu.empty_cache()
+            
+        return embed_pb2.RawEmbedResponse(allembeddings=embeddings)
+    
     async def Predict(self, request, context):
         max_input_length = self.model.max_input_length
         batch = self.model.batch_type.from_pb(
@@ -42,6 +61,9 @@ class EmbeddingService(embed_pb2_grpc.EmbeddingServiceServicer):
 
         scores = self.model.predict(batch)
 
+        if clean_npu_cache == "True":
+            torch_npu.npu.empty_cache()
+            
         return embed_pb2.PredictResponse(scores=scores)
 
 
@@ -67,6 +89,10 @@ def serve(
             interceptors=[
                 ExceptionInterceptor(),
                 UDSOpenTelemetryAioServerInterceptor(),
+            ],
+            options = [
+                ('grpc_max_send_message_length', 100 * 1024 * 1024),
+                ('grpc_max_recieve_message_length', 100 * 1024 * 1024),
             ]
         )
         embed_pb2_grpc.add_EmbeddingServiceServicer_to_server(
